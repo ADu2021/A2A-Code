@@ -1,0 +1,35 @@
+{
+  "//": "Merge into .claude/settings.json (project) or ~/.claude/settings.json (user). Paths assume the skill-bundled install (~/.claude/skills/a2a-code); for a repo clone, swap in its path or export A2A_BUS (the stop hook tries A2A_BUS, ~/.claude/skills/a2a-code, ~/a2a-code, ~/a2a-bus).",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ~/.claude/skills/a2a-code/tools/a2a.py check --max-age 0 || true"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ~/.claude/skills/a2a-code/tools/a2a.py check --max-age 120 || true"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ~/.claude/skills/a2a-code/hooks/a2a_stop_hook.py"
+          }
+        ]
+      }
+    ]
+  }
+}

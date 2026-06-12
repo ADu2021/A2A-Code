@@ -1,0 +1,29 @@
+# /etc/systemd/system/a2a-relay.service
+# sudo systemctl daemon-reload && sudo systemctl enable --now a2a-relay
+[Unit]
+Description=A2A-Code relay bus (v2)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=a2a
+Group=a2a
+WorkingDirectory=/opt/a2a
+Environment=A2A_DB=/var/lib/a2a/relay.db
+Environment=A2A_HOST=127.0.0.1
+Environment=A2A_PORT=8080
+Environment=A2A_RETENTION_DAYS=30
+# Tokens live in a root-readable env file, never in this unit:
+#   echo 'A2A_BUS_TOKENS=research-x:<openssl rand -hex 24>' | sudo tee /etc/a2a/relay.env
+EnvironmentFile=/etc/a2a/relay.env
+ExecStart=/usr/bin/python3 /opt/a2a/relay.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/a2a
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

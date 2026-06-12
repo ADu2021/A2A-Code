@@ -1,0 +1,10 @@
+# /etc/caddy/Caddyfile — automatic HTTPS via Let's Encrypt.
+# Point an A record (bus.yourdomain.com) at the VM's external IP first.
+bus.yourdomain.com {
+	reverse_proxy 127.0.0.1:8080 {
+		# long-poll holds up to A2A_MAX_WAIT (300 s) — don't cut them off
+		transport http {
+			response_header_timeout 330s
+		}
+	}
+}

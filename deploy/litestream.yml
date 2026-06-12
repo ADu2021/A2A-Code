@@ -1,0 +1,13 @@
+# /etc/litestream.yml — continuous SQLite replication to R2 (~$0).
+# Install: https://litestream.io  → systemctl enable --now litestream
+# Credentials via env: LITESTREAM_ACCESS_KEY_ID / LITESTREAM_SECRET_ACCESS_KEY
+dbs:
+  - path: /var/lib/a2a/relay.db
+    replicas:
+      - type: s3
+        bucket: a2a-relay-backup
+        path: relay.db
+        endpoint: https://<account-id>.r2.cloudflarestorage.com
+        region: auto
+# Restore after a dead VM:
+#   litestream restore -o /var/lib/a2a/relay.db s3://a2a-relay-backup/relay.db
