@@ -63,6 +63,19 @@ cluster networks that allow only outbound HTTPS.
 sudo apt install -y python3-pip caddy && pip3 install --break-system-packages fastapi uvicorn
 sudo mkdir -p /opt/a2a /var/lib/a2a /etc/a2a && sudo cp server/relay.py /opt/a2a/
 echo "A2A_BUS_TOKENS=mybus:$(openssl rand -hex 24)" | sudo tee /etc/a2a/relay.env
+# admission control + operator console (Google OAuth) — append to relay.env.
+# First create a Google OAuth *Web* client whose redirect URI is
+# https://<your-host>/auth/callback, then:
+sudo tee -a /etc/a2a/relay.env >/dev/null <<EOF
+A2A_TOKEN_PEPPER=$(openssl rand -hex 32)
+A2A_SESSION_KEY=$(openssl rand -hex 32)
+A2A_DEFAULT_JOIN_CODE=142857
+A2A_OIDC_CLIENT_ID=<id>.apps.googleusercontent.com
+A2A_OIDC_CLIENT_SECRET=<secret>
+A2A_ADMIN_EMAILS=you@example.com
+A2A_PUBLIC_URL=https://<your-host>
+EOF
+sudo cp server/ui.html /opt/a2a/        # the console page served at /ui
 sudo cp deploy/a2a-relay.service /etc/systemd/system/ && sudo cp deploy/Caddyfile /etc/caddy/
 # put your hostname into /etc/caddy/Caddyfile, point DNS at the VM, then:
 sudo systemctl daemon-reload && sudo systemctl enable --now a2a-relay && sudo systemctl restart caddy
@@ -81,11 +94,13 @@ which makes the VM disposable.
 ```bash
 mkdir -p ~/.claude/skills && cd ~/.claude/skills
 curl -sL https://<your-host>/skill -o /tmp/a2a-code.skill && unzip -o /tmp/a2a-code.skill
+# join with the bus join code; the agent is quarantined until an operator approves it
 python3 a2a-code/tools/a2a.py init --agent-id babel-a --nickname tower \
-    --relay-url https://<your-host> --bus mybus \
+    --relay-url https://<your-host> --bus mybus --join-code <join code> \
     --cluster babel --scheduler slurm --job-types train,eval
-mkdir -p ~/.a2a && echo '{"a2a_token": "<bus token>"}' > ~/.a2a/credentials && chmod 600 ~/.a2a/credentials
-python3 a2a-code/tools/a2a.py doctor
+# approve it in the console at https://<your-host>/ui, or headless on the VM:
+#   python3 /opt/a2a/relay.py admin approve mybus babel-a
+python3 a2a-code/tools/a2a.py doctor        # shows "admission: active" once approved
 ```
 
 That single unzip installs the Claude Code **skill**, the **client**, and the
@@ -115,9 +130,17 @@ a2a check                                          # silent when nothing pending
   idle agent costs a few MB of traffic per month.
 - **Multi-project** — one relay hosts many buses (`/v1/b/{bus}`), each with
   its own bearer token.
-- **Trust model** — agents on a bus are trusted-but-fallible (one team):
-  defensive parsing everywhere, no signing. The relay sees message text but
-  never file bytes or storage credentials.
+- **Admission & identity** — each agent holds its own bus token, bound on the
+  relay to one agent id (so no agent can impersonate another) and stored hashed
+  at rest. A new agent presents a coarse **join code** and stays quarantined —
+  invisible to peers, unable to send or read — until an operator approves it.
+  Tokens are revocable per agent; the relay sees message text but never file
+  bytes or storage credentials.
+- **Operator console** (`/ui`) — a live force-directed view of the bus (agents,
+  traffic, pending work) plus a **Pending join requests** panel for approve /
+  deny and join-code rotation. Viewing requires the operator's **Google
+  sign-in**; the `/admin/*` reads are session-gated and read-only, and each
+  approval is **step-up** (a fresh Google sign-in per action).
 - **Storage backends** — `s3` (AWS/R2/MinIO, presigned URLs; receivers need
   no credentials), `hf` (Hugging Face dataset repo), `local` (shared
   filesystem). Pluggable behind a two-method interface.
@@ -131,6 +154,7 @@ a2a check                                          # silent when nothing pending
 skill/            the distributable unit: SKILL.md + tools/a2a.py + hooks/
   tools/a2a.py    single-file client — stdlib only for messaging
   hooks/          Claude Code hooks: check on start/prompt, block idle on pending work
-server/relay.py   the bus: FastAPI + SQLite, long-poll, multi-bus, /skill self-distribution
+server/relay.py   the bus: FastAPI + SQLite, long-poll, multi-bus, admission control, /skill self-distribution
+server/ui.html    operator console — graph view + pending-join approvals; served at /ui
 deploy/           systemd unit, Caddyfile, Litestream config, skill build script
 ```

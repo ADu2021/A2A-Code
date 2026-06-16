@@ -623,6 +623,9 @@ class RelayClient:
     def health(self):
         return self.call("GET", "/health")
 
+    def admission(self):
+        return self.call("GET", f"{self.base}/admission")
+
 
 _RC = None
 
@@ -632,6 +635,52 @@ def relay_client(cfg: dict) -> RelayClient:
     if _RC is None:
         _RC = RelayClient(cfg)
     return _RC
+
+
+def _store_token(token: str) -> None:
+    """Persist the per-agent bus token to ~/.a2a/credentials (0600)."""
+    CRED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    creds = _load_cred_file()
+    creds["a2a_token"] = token
+    dump_json(CRED_FILE, creds)
+    try:
+        CRED_FILE.chmod(0o600)
+    except OSError:
+        pass
+
+
+def relay_join(cfg: dict, join_code: str, card: dict) -> dict:
+    """Tokenless POST /join — first contact, gated by the bus join code."""
+    import http.client
+    from urllib.parse import urlsplit
+    u = urlsplit(cfg["relay_url"])
+    https = u.scheme == "https"
+    conn = (http.client.HTTPSConnection if https else http.client.HTTPConnection)(
+        u.hostname, u.port or (443 if https else 80), timeout=30)
+    body = json.dumps({"agent_id": cfg["agent_id"], "join_code": join_code,
+                       "card": card})
+    try:
+        conn.request("POST", f"/v1/b/{cfg['bus']}/join", body,
+                     {"Content-Type": "application/json"})
+        r = conn.getresponse()
+        data = r.read()
+    except Exception as e:
+        die(f"relay unreachable ({u.hostname}): {e}", 1)
+    if r.status >= 400:
+        die(f"join refused -> {r.status}: {data.decode()[:200]}", 1)
+    return json.loads(data)
+
+
+def _poll_admission(rc: RelayClient, tries: int = 6, delay: int = 5):
+    """Return (state, message); polls a few times so a quick approval lands live."""
+    for i in range(tries):
+        r = rc.admission()
+        state = r.get("state")
+        if state != "pending":
+            return state, r.get("message")
+        if i < tries - 1:
+            time.sleep(delay)
+    return "pending", None
 
 
 def relay_find(rc: RelayClient, msg_id: str):
@@ -796,43 +845,39 @@ def cmd_init(root: Path, args) -> None:
         if args.storage:
             cfg["storage"] = _storage_cfg(args)
         save_cfg(root, cfg)
+        # The card we want published (sent at join; the relay publishes it on
+        # approval). Identity is operator-approved now: first contact uses the
+        # bus join code and waits for approval; restarts reuse the stored token.
+        card = {"agent_id": args.agent_id, "agent_kind": args.agent_kind,
+                "cluster": {"name": args.cluster, "scheduler": args.scheduler},
+                "capabilities": {"gpus": args.gpus} if args.gpus else {},
+                "job_types": args.job_types.split(",") if args.job_types else [],
+                "status": args.status, "status_detail": "",
+                "session_id": cfg["session_id"], "session_started": iso(now()),
+                "last_heartbeat": iso(now()), "schema": SCHEMA}
+        if args.nickname:
+            card["nickname"] = args.nickname
+
+        if args.join_code:           # explicit (re)join — also the migration path
+            resp = relay_join(cfg, args.join_code, card)
+            _store_token(resp["token"])
+            print(f"join requested as {args.agent_id} on {args.bus} "
+                  f"@ {args.relay_url} — awaiting operator approval")
+        elif not _cred("A2A_TOKEN"):
+            die("first contact needs --join-code (ask your operator for the "
+                "bus join code); you then await approval", 2)
+
         rc = relay_client(cfg)
-        prior = next((c for c in rc.agents()
-                      if c["agent_id"] == args.agent_id), None)
-        if prior:
-            # Inherit the existing identity: the previous incarnation may have
-            # been killed/restarted. Card, nickname, capabilities, and the
-            # server-side read position survive; only the session rotates.
-            card = {k: v for k, v in prior.items() if not k.startswith("_")}
-            for k, v in (("nickname", args.nickname),
-                         ("job_types", args.job_types.split(",")
-                          if args.job_types else None),
-                         ("capabilities", {"gpus": args.gpus}
-                          if args.gpus else None),
-                         ("status", args.status)):
-                if v is not None:
-                    card[k] = v
-            if args.cluster != "unknown":
-                card["cluster"] = {"name": args.cluster,
-                                   "scheduler": args.scheduler}
+        state, msg = _poll_admission(rc)
+        if state == "active":
+            rc.post_card(card)
+            print(f"approved — registered {args.agent_id} "
+                  f"(session={cfg['session_id']})")
+        elif state in ("denied", "revoked"):
+            die(f"join {state}: {msg or 'declined by operator'}", 3)
         else:
-            card = {"agent_id": args.agent_id, "agent_kind": args.agent_kind,
-                    "cluster": {"name": args.cluster,
-                                "scheduler": args.scheduler},
-                    "capabilities": {"gpus": args.gpus} if args.gpus else {},
-                    "job_types": (args.job_types.split(",")
-                                  if args.job_types else []),
-                    "status": args.status, "status_detail": "",
-                    "schema": SCHEMA}
-            if args.nickname:
-                card["nickname"] = args.nickname
-        card["session_id"] = cfg["session_id"]      # new incarnation
-        card["session_started"] = iso(now())
-        card["last_heartbeat"] = iso(now())
-        rc.post_card(card)
-        verb = "inherited identity" if prior else "registered agent"
-        print(f"{verb} {args.agent_id} on relay bus {args.bus} "
-              f"@ {args.relay_url} (session={cfg['session_id']})")
+            print("still pending operator approval — re-run `a2a.py doctor` "
+                  "(or this init) once approved")
         return
 
     # -------------------------------------- v1 git mode
@@ -1174,8 +1219,14 @@ def cmd_doctor(root: Path, args) -> None:
             rc = relay_client(cfg)
             h = rc.health()
             check("relay reachable", bool(h.get("ok")), cfg.get("relay_url", ""))
-            rc.agents()
-            check("relay auth (bus token)", True, f"bus={cfg.get('bus')}")
+            adm = rc.admission()
+            st = adm.get("state", "?")
+            check(f"admission: {st}", st == "active",
+                  adm.get("message", "") if st != "active" else f"bus={cfg.get('bus')}",
+                  warn=(st == "pending"))
+            if st == "active":
+                rc.agents()
+                check("relay auth (per-agent token)", True, f"agent={cfg.get('agent_id')}")
         except RuntimeError as e:
             check("relay reachable/auth", False, str(e)[:120])
         check("initialized (.a2a/config.json)", True,
@@ -1248,10 +1299,11 @@ def build_parser() -> argparse.ArgumentParser:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("init", help="register (or inherit) an agent identity")
+    p = sub.add_parser("init", help="join a relay bus (await operator approval) or init a git clone")
     p.add_argument("--agent-id", required=True)
     p.add_argument("--relay-url", help="v2: relay base URL (switches transport to relay)")
     p.add_argument("--bus", help="v2: bus (project namespace) on the relay")
+    p.add_argument("--join-code", help="v2: bus join code for first contact; you then await operator approval")
     p.add_argument("--nickname", help="user-facing alias (your user's name for this cluster)")
     p.add_argument("--agent-kind", default="claude-code")
     p.add_argument("--cluster", default="unknown")

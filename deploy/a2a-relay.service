@@ -14,8 +14,17 @@ Environment=A2A_DB=/var/lib/a2a/relay.db
 Environment=A2A_HOST=127.0.0.1
 Environment=A2A_PORT=8080
 Environment=A2A_RETENTION_DAYS=30
-# Tokens live in a root-readable env file, never in this unit:
-#   echo 'A2A_BUS_TOKENS=research-x:<openssl rand -hex 24>' | sudo tee /etc/a2a/relay.env
+# Secrets/config live in a root-readable env file, never in this unit. Example:
+#   sudo tee /etc/a2a/relay.env >/dev/null <<'EOF'
+#   A2A_BUS_TOKENS=research-x:<openssl rand -hex 24>    # legacy/bootstrap (see A2A_ALLOW_LEGACY_TOKEN)
+#   A2A_TOKEN_PEPPER=<openssl rand -hex 32>             # peppers per-agent token hashes
+#   A2A_DEFAULT_JOIN_CODE=142857                        # coarse join code (rotate in the console)
+#   A2A_OIDC_CLIENT_ID=<id>.apps.googleusercontent.com  # Google OAuth client (operator console)
+#   A2A_OIDC_CLIENT_SECRET=<secret>
+#   A2A_ADMIN_EMAILS=you@example.com                    # who may sign in / approve
+#   A2A_SESSION_KEY=<openssl rand -hex 32>              # signs the 24h console session
+#   A2A_PUBLIC_URL=https://adu-a2a-code.duckdns.org     # OAuth redirect base
+#   EOF
 EnvironmentFile=/etc/a2a/relay.env
 ExecStart=/usr/bin/python3 /opt/a2a/relay.py
 Restart=always
